@@ -32,9 +32,9 @@ AWS_USE_PATH_STYLE_ENDPOINT = os.getenv('AWS_USE_PATH_STYLE_ENDPOINT')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['http://127.0.0.1', 'http://localhost', 'http://surgu-calendar.ru', 'http://www.surgu-calendar.ru',  'http://185.84.162.83']
 
-CSRF_TRUSTED_ORIGINS = ['http://127.0.0.1', 'http://localhost']
+CSRF_TRUSTED_ORIGINS = ['http://127.0.0.1', 'http://localhost', 'http://surgu-calendar.ru', 'http://www.surgu-calendar.ru',  'http://185.84.162.83']
 
 
 # Application definition
