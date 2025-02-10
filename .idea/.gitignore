@@ -1,0 +1,15 @@
+# Default ignored files
+/shelf/
+/workspace.xml
+
+# Виртуальное окружение
+venv/
+
+# Файлы среды
+.env
+**/.env
+*.pyc
+__pycache__/
+
+# Логи и временные файлы
+*.log
