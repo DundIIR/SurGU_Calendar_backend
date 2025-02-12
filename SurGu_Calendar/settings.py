@@ -32,9 +32,16 @@ AWS_USE_PATH_STYLE_ENDPOINT = os.getenv('AWS_USE_PATH_STYLE_ENDPOINT')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['http://127.0.0.1', 'http://localhost', 'http://surgu-calendar.ru', 'http://www.surgu-calendar.ru',  'http://185.84.162.83']
+ALLOWED_HOSTS = ['surgu-calendar.ru', 'www.surgu-calendar.ru', '185.84.162.83']
 
-CSRF_TRUSTED_ORIGINS = ['http://127.0.0.1', 'http://localhost', 'http://surgu-calendar.ru', 'http://www.surgu-calendar.ru',  'http://185.84.162.83']
+CSRF_TRUSTED_ORIGINS = ['http://127.0.0.1', 'http://localhost']
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://185.84.162.83",
+]
+
+CORS_ALLOW_CREDENTIALS = True
 
 
 # Application definition
@@ -49,6 +56,7 @@ INSTALLED_APPS = [
 
     'main',
     'rest_framework',
+    'corsheaders',
 ]
 
 MIDDLEWARE = [
@@ -59,6 +67,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
 ]
 
 ROOT_URLCONF = 'SurGu_Calendar.urls'
