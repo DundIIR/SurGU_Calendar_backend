@@ -3,6 +3,12 @@ from rest_framework import serializers
 from .create_json import create_json
 from .models import *
 
+# Сериализатор для списка групп
+class GroupSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Group
+        fields = ['number_group']
+
 
 # Сериализатор для расписания
 class LessonSerializer(serializers.ModelSerializer):
@@ -25,6 +31,8 @@ class SubgroupSerializer(serializers.ModelSerializer):
             'subgroup': instance.name_subgroup,
             'group': instance.group.number_group
         }
+
+#
 
 
 # Сериализатор для преподавателей

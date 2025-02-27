@@ -32,18 +32,20 @@ AWS_USE_PATH_STYLE_ENDPOINT = os.getenv('AWS_USE_PATH_STYLE_ENDPOINT')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['surgu-calendar.ru', 'www.surgu-calendar.ru', '185.84.162.83']
+ALLOWED_HOSTS = ['surgu-calendar.ru', 'www.surgu-calendar.ru', '185.84.162.83', '127.0.0.1', 'localhost']
 
 CSRF_TRUSTED_ORIGINS = ['http://127.0.0.1', 'http://localhost']
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
-    "https://surgu-calendar.ri",
-    "https://www.surgu-calendar.ri",
+    "https://surgu-calendar.ru",
+    "https://www.surgu-calendar.ru",
     "https://185.84.162.83",
 ]
 
 CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+CORS_ALLOW_HEADERS = ["*"]
 
 
 # Application definition

@@ -24,6 +24,7 @@ def parse_schedule_data(schedule_data, schedule_dict, type_campus, type_subgroup
     """
     group_number, name_speciality, cod_speciality = '', '', ''
     day = 'None'  # День недели (по умолчанию отсутствует)
+
     try:
         # Итерация по строкам данных расписания
         for index, row in enumerate(schedule_data):
@@ -72,8 +73,16 @@ def parse_schedule_data(schedule_data, schedule_dict, type_campus, type_subgroup
                     start_schedule = date_range[0]
                     end_schedule = date_range[1]
                 else:
-                    start_schedule = '03.02.2025'
-                    end_schedule = '31.06.2025'
+                    group_info = schedule_data[0][2].replace('\n', '')
+                    match = re.search(pattern, group_info)
+                    if match:
+                        date_range = match.group().split('-')
+                        start_schedule = date_range[0]
+                        end_schedule = date_range[1]
+                    else:
+                        raise ValueError("Не удалось найти даты начала и окончания семестра")
+                        start_schedule = '03.02.2025'
+                        end_schedule = '30.06.2025'
 
                 # Добавление диапазона дат в словарь
                 schedule_dict[cod_speciality]['groups'][group_number]['schedule'] = {
@@ -216,7 +225,7 @@ def process_schedule(path_pdf, type_campus, type_subgroup, type_abbreviations, s
             professors = json.load(f)
 
         # Инициализация словаря для расписания
-        schedule_dict = {'key': 'okey'}
+        schedule_dict = {}
 
         # Использование pdfplumber для работы с файлом
         with pdf_open(path_pdf) as pdf:
@@ -235,14 +244,14 @@ def process_schedule(path_pdf, type_campus, type_subgroup, type_abbreviations, s
 
                     if schedule_data:
                         print(f"Парсер: обработка страницы {page_number}")
-                        # schedule_dict = parse_schedule_data(
-                        #     schedule_data,
-                        #     schedule_dict,
-                        #     type_campus,
-                        #     type_subgroup,
-                        #     type_abbreviations,
-                        #     professors
-                        # )
+                        schedule_dict = parse_schedule_data(
+                            schedule_data,
+                            schedule_dict,
+                            type_campus,
+                            type_subgroup,
+                            type_abbreviations,
+                            professors
+                        )
                     else:
                         print(f"Парсер: на странице {page_number} нет данных.")
                 except Exception as e:

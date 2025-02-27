@@ -1,28 +1,25 @@
 import os
-
 import boto3
 from django.db.models import Q
-from django.shortcuts import render
+from django.http import FileResponse
+from django.shortcuts import render, get_object_or_404
 from rest_framework import generics
 from rest_framework.parsers import MultiPartParser
 from rest_framework.views import APIView
 from urllib.parse import unquote
-
 from .authentication import IsAdminUserRole
 from .models import *
 from .serializers import LessonSerializer, SubgroupSerializer, ProfessorSerializer, CustomUserSerializer, \
-    UserListSerializer, FileSerializer
-
+    UserListSerializer, FileSerializer, GroupSerializer
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.permissions import AllowAny
 from rest_framework.exceptions import AuthenticationFailed, ValidationError, NotFound
 from rest_framework.authentication import BaseAuthentication
-
 from django.conf import settings
-
 import uuid
 from datetime import datetime
+import re
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
@@ -34,7 +31,178 @@ REST_FRAMEWORK = {
 def index(request):
     return render(request, 'index.html')
 
-import re
+
+## БЕЗ РЕГИСТРАЦИИ
+
+
+# Контроллер для получения списка всех групп
+class GroupList(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        groups = Group.objects.values_list('number_group', flat=True)
+        return Response(list(groups))
+
+
+# Контроллер для получения списка всех преподавателей
+class ProfessorsList(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        professors = Professor.objects.all()
+        full_names = [f"{prof.last_name} {prof.first_name} {prof.patronymic}" for prof in professors]
+        return Response(full_names)
+
+
+# Контроллер для проверки запроса
+class SearchCheck(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        query = request.query_params.get('search', '')
+
+        if query:
+            first_char = query[0]
+
+            # Если первая цифра
+            if first_char.isdigit():
+                group = get_object_or_404(Group, number_group=query)
+                subgroups = Subgroup.objects.filter(group=group)
+                subgroup_numbers = [subgroup.name_subgroup for subgroup in subgroups]
+                if subgroup_numbers:
+                    return Response(subgroup_numbers)
+                else:
+                    return Response({"message": "Нет подгрупп"}, status=404)
+
+            # Если первая буква
+            elif first_char.isalpha():
+
+                name_parts = query.split()
+
+                # Примерные формы ввода:
+                # "Емельянов С Н", "Емельянов Сергей Николаевич", "Емельянов", "Емельянов Сергей"
+                if len(name_parts) == 1:
+                    # Только фамилия
+                    professors = Professor.objects.filter(last_name__icontains=name_parts[0])
+                elif len(name_parts) == 2:
+                    # Фамилия + инициалы/имя
+                    professors = Professor.objects.filter(
+                        Q(last_name__icontains=name_parts[0]) &
+                        (Q(first_name__icontains=name_parts[1]) | Q(patronymic__icontains=name_parts[1]))
+                    )
+                elif len(name_parts) == 3:
+                    # Фамилия + имя + отчество
+                    professors = Professor.objects.filter(
+                        Q(last_name__icontains=name_parts[0]) &
+                        Q(first_name__icontains=name_parts[1]) &
+                        Q(patronymic__icontains=name_parts[2])
+                    )
+                else:
+                    return Response({"message": "Неверный формат запроса"}, status=400)
+
+                professor_names = [f"{prof.last_name} {prof.first_name} {prof.patronymic}" for prof in professors]
+                if professor_names:
+                    return Response(professor_names)
+                else:
+                    return Response({"message": "Преподаватель не найден"}, status=404)
+
+        return Response({"message": "Неверный запрос"}, status=400)
+
+
+class ScheduleFileView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        search = request.query_params.get('search', '')
+        subgroup = request.query_params.get('subgroup', None)
+        professors = request.query_params.get('professors', 'false').lower() == 'true'
+
+        if not search:
+            return Response({"message": "Поле 'search' обязательно"}, status=400)
+
+        if professors:
+            professor = self.get_professor(search)
+            if not professor:
+                return Response({"message": "Преподаватель не найден"}, status=404)
+            schedule = Lesson.objects.filter(professor=professor)
+            filename = f"schedule_{professor.last_name}.ics"
+            schedule_obj = Schedule.objects.filter(professor=professor).first()
+        else:
+            group = get_object_or_404(Group, number_group=search)
+            schedule = self.get_group_schedule(group, subgroup)
+            filename = f"schedule_{search}.ics"
+            schedule_obj = Schedule.objects.filter(group_subgroup__group=group).first()
+
+        if not schedule.exists():
+            return Response({"message": "Расписание не найдено"}, status=404)
+
+        # Проверка наличия файла в БД
+        if schedule_obj and schedule_obj.file:
+            file_path = schedule_obj.file.path
+        else:
+            file_path = os.path.join(settings.MEDIA_ROOT, "schedule", filename)
+            if not os.path.exists(file_path):
+                self.create_ics_file(schedule, file_path)
+
+            # Сохранение файла в БД
+            new_file = File()
+            new_file.file = file_path
+            new_file.save()
+            if schedule_obj:
+                schedule_obj.file = new_file
+                schedule_obj.save()
+
+        return FileResponse(open(file_path, 'rb'), as_attachment=True, filename=filename)
+
+
+
+    def get_professor(self, search):
+        parts = search.split()
+        if len(parts) == 1:
+            return Professor.objects.filter(last_name__icontains=parts[0]).first()
+        elif len(parts) == 2:
+            return Professor.objects.filter(last_name__icontains=parts[0], first_name__icontains=parts[1]).first()
+        elif len(parts) == 3:
+            return Professor.objects.filter(last_name=parts[0], first_name=parts[1], patronymic=parts[2]).first()
+        return None
+
+    def get_group_schedule(self, group, subgroup):
+        if subgroup and subgroup.lower() != "none":
+            lessons1 = Lesson.objects.filter(schedule__group_subgroup__group__group_number=group,
+                                             schedule__group_subgroup__subgroup_name=subgroup)
+            lessons2 = Lesson.objects.filter(schedule__group_subgroup__group__group_number=group,
+                                             schedule__group_subgroup__subgroup_name=None)
+            lessons = lessons1.union(lessons2)
+            return lessons
+        return Lesson.objects.filter(schedule__group_subgroup__group__group_number=group)
+
+    def create_ics_file(self, schedule, file_path):
+        events = []
+        for lesson in schedule:
+            start_date = lesson.schedule.first().start_schedule
+            repeat_rule = ";INTERVAL=2" if lesson.repetition in ["Числитель", "Знаменатель"] else ""
+            start_time = start_date.strftime("%Y%m%dT%H%M%S")
+            end_time = (start_date + timedelta(hours=1, minutes=30)).strftime("%Y%m%dT%H%M%S")
+            events.append(f"BEGIN:VEVENT\nDTSTART:{start_time}\nDTEND:{end_time}\nSUMMARY:{lesson.discipline}\nDESCRIPTION:{lesson.professor}\nLOCATION:{lesson.campus} {lesson.audience}\nRRULE:FREQ=WEEKLY{repeat_rule}\nEND:VEVENT")
+
+        ics_content = "BEGIN:VCALENDAR\nVERSION:2.0\n" + "\n".join(events) + "\nEND:VCALENDAR"
+        default_storage.save(file_path, ContentFile(ics_content))
+
+
+
+
+
+
+
+
+
+
+
+
 def split_by_letter(input_string):
     pattern = r"^\d{3}-\d{2}[а-яА-Я]$"
 
@@ -46,6 +214,7 @@ def split_by_letter(input_string):
         return [input_string[:-1], input_string[-1]]
     # Группа без подгруппы: 609-11
     return [input_string]
+
 
 # Контроллер для получения расписания с фильтрацией
 class LessonAPIList(generics.ListAPIView):
@@ -263,6 +432,7 @@ class UpdateUserRoleAPIView(APIView):
 from io import BytesIO
 from .parser.parse_schedule import process_schedule
 
+
 class UploadAndProcessScheduleAPIView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -313,7 +483,9 @@ class UploadAndProcessScheduleAPIView(APIView):
 
             # Проверка длины названия
             if len(file.name) > 250:
-                return Response({'error': f'Название файла слишком длинное ({len(file.name)} символов). Максимум 250 символов.'}, status=400)
+                return Response(
+                    {'error': f'Название файла слишком длинное ({len(file.name)} символов). Максимум 250 символов.'},
+                    status=400)
 
             # Проверка размера файла
             if file.size > 10 * 1024 * 1024:  # 10MB
@@ -323,7 +495,7 @@ class UploadAndProcessScheduleAPIView(APIView):
             unique_name = str(uuid.uuid4()) + '.pdf'
 
             try:
-                # # Загрузка файла в S3
+                # Загрузка файла в S3
                 # s3_client.upload_fileobj(
                 #     Fileobj=file,
                 #     Bucket=settings.AWS_BUCKET,
@@ -358,8 +530,7 @@ class UploadAndProcessScheduleAPIView(APIView):
 
                     # Добавление данных в БД
                     if schedule_data:
-                        result = schedule_data
-
+                        result = add_schedule_data(schedule_data)
                 except Exception as e:
                     return Response({'error': f'Ошибка обработки файла {file.name}: {str(e)}'}, status=500)
 
@@ -367,7 +538,7 @@ class UploadAndProcessScheduleAPIView(APIView):
                 file_url = f"{settings.AWS_END_POINT}/{settings.AWS_BUCKET}/{unique_name}"
 
                 # # Добавление записи о файле в БД (если нужно)
-                # FileSchedule.objects.create(file_name=file.name, file_url=file_url)
+                FileSchedule.objects.create(file_name=file.name, file_url=file_url)
 
                 uploaded_files.append({'file_name': file.name, 'file_url': file_url, 'db_status': result})
 
@@ -392,6 +563,16 @@ class FileListAPIView(APIView):
 
 from datetime import datetime
 from django.db import IntegrityError
+
+from django.db import transaction
+
+
+# import logging
+#
+# logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+# logger = logging.getLogger(__name__)
+
+
 def add_schedule_data(data):
     print('Данные получены')
     try:
@@ -408,6 +589,7 @@ def add_schedule_data(data):
                     number_group=group_code,
                     speciality=speciality
                 )
+                print(group)
 
                 for subgroup_code, subgroup_data in group_data['subgroup'].items():
                     # 3. Получаем или создаем подгруппу
@@ -417,17 +599,18 @@ def add_schedule_data(data):
 
                     subgroup, created = Subgroup.objects.get_or_create(
                         group=group,
-                        name_subgroup=subgroup_code, # Добавить проверку, если код ноль, то присвоить NULL
+                        name_subgroup=subgroup_code,  # Добавить проверку, если код ноль, то присвоить NULL
                         defaults={'relations': relations}
                     )
 
+                    print(group_data['schedule']['start_schedule'], group_data['schedule']['end_schedule'])
                     # 4. Создаем расписание
                     schedule, created = Schedule.objects.get_or_create(
                         start_schedule=datetime.strptime(group_data['schedule']['start_schedule'], '%d.%m.%Y'),
                         end_schedule=datetime.strptime(group_data['schedule']['end_schedule'], '%d.%m.%Y'),
                         subgroup=subgroup
                     )
-
+                    print(subgroup)
                     # Проходим по каждому дню недели
                     for weekday, lessons in subgroup_data.items():
                         # Проходим по каждому номеру пары
@@ -436,22 +619,35 @@ def add_schedule_data(data):
                             for lesson_repetition, lesson_info in lesson_data.items():
 
                                 # 5.1 Получаем или создаем преподавателя
-                                last_name, first_name_and_patronymic = lesson_info['professor_id'].split()
-                                first_name, patronymic = first_name_and_patronymic.split('.')[:2]
+                                print(lesson_info)
+                                parts = lesson_info['professor_id'].split()
 
-                                professor = Professor.objects.filter(
-                                    last_name=last_name,
-                                    first_name__startswith=first_name,
-                                    patronymic__startswith=patronymic
-                                ).first()
+                                if len(parts) > 1:  # Если есть хотя бы фамилия и инициалы
+                                    last_name, first_name_and_patronymic = parts[0], parts[1]
+                                    first_name, patronymic = first_name_and_patronymic.split('.')[:2]
 
-                                if not professor:
-                                    professor = Professor.objects.create(
+                                    professor = Professor.objects.filter(
                                         last_name=last_name,
-                                        first_name=first_name,
-                                        patronymic=patronymic,
-                                        post="Неизвестно",  # Должность неизвестна
-                                        department_id=1  # департамент 1
+                                        first_name__startswith=first_name,
+                                        patronymic__startswith=patronymic
+                                    ).first()
+
+                                    if not professor:
+                                        professor = Professor.objects.create(
+                                            last_name=last_name,
+                                            first_name=first_name,
+                                            patronymic=patronymic,
+                                            post="Неизвестно",  # Должность неизвестна
+                                            department_id=1  # департамент 1
+                                        )
+                                else:
+                                    # Если строка содержит только одно слово, значит, это не ФИО
+                                    professor = Professor.objects.get_or_create(
+                                        last_name='Добавить ФИО преподавателя',
+                                        first_name=' ',
+                                        patronymic=' ',
+                                        post="Неизвестно",
+                                        department_id=1
                                     )
 
                                 # 5.2 Получаем или создаем аудиторию
@@ -475,7 +671,6 @@ def add_schedule_data(data):
                                 # 5.5 Получаем день недели
                                 day_of_week = Week.objects.get(day_reduction=weekday)
                                 print(day_of_week)
-
 
                                 # 5.6 Получаем повторяемость
                                 # repetition = Repetition.objects.filter(
@@ -510,7 +705,8 @@ def add_schedule_data(data):
                                     number_lesson=lesson_time
                                 )
 
-                                print(number_lesson, day_of_week, campus, audience, discipline, type, repetition, professor)
+                                print(number_lesson, day_of_week, campus, audience, discipline, type, repetition,
+                                      professor)
 
                                 # 6. Создаем запись о занятии
                                 lesson, created = Lesson.objects.get_or_create(
@@ -535,5 +731,3 @@ def add_schedule_data(data):
     except Exception as e:
         print('Ошибка 2', e)
         return f"Error: {e}"
-
-
