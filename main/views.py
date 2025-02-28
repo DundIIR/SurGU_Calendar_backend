@@ -18,6 +18,7 @@ from rest_framework.exceptions import AuthenticationFailed, ValidationError, Not
 from rest_framework.authentication import BaseAuthentication
 from django.conf import settings
 import uuid
+from datetime import datetime, timedelta
 from datetime import datetime
 import re
 
@@ -124,6 +125,8 @@ class ScheduleFileView(APIView):
         if not search:
             return Response({"message": "Поле 'search' обязательно"}, status=400)
 
+        print(search, subgroup, professors)
+
         if professors:
             professor = self.get_professor(search)
             if not professor:
@@ -132,31 +135,60 @@ class ScheduleFileView(APIView):
             filename = f"schedule_{professor.last_name}.ics"
             schedule_obj = Schedule.objects.filter(professor=professor).first()
         else:
-            group = get_object_or_404(Group, number_group=search)
-            schedule = self.get_group_schedule(group, subgroup)
-            filename = f"schedule_{search}.ics"
-            schedule_obj = Schedule.objects.filter(group_subgroup__group=group).first()
 
-        if not schedule.exists():
-            return Response({"message": "Расписание не найдено"}, status=404)
 
-        # Проверка наличия файла в БД
-        if schedule_obj and schedule_obj.file:
-            file_path = schedule_obj.file.path
-        else:
-            file_path = os.path.join(settings.MEDIA_ROOT, "schedule", filename)
-            if not os.path.exists(file_path):
-                self.create_ics_file(schedule, file_path)
+            group = Group.objects.filter(number_group=search).first()
+            if not group:
+                return Response({"message": "Группа не найдена"}, status=404)
 
-            # Сохранение файла в БД
-            new_file = File()
-            new_file.file = file_path
-            new_file.save()
-            if schedule_obj:
-                schedule_obj.file = new_file
-                schedule_obj.save()
+            # Получаем подгруппу, если указана
+            if subgroup and subgroup.lower() != "none":
+                subgroup = Subgroup.objects.filter(group=group, name_subgroup=subgroup).first()
+                if not subgroup:
+                    return Response({"message": "Подгруппа не найдена"}, status=404)
+            else:
+                subgroup = None
 
-        return FileResponse(open(file_path, 'rb'), as_attachment=True, filename=filename)
+            # 2. Находим расписание для этой группы и подгруппы
+            schedule = Schedule.objects.filter(subgroup=subgroup).first()
+            if not schedule:
+                return Response({"message": "Расписание не найдено"}, status=404)
+
+            # if schedule.file:
+            #     file_path = schedule.file.file_path.path
+            # else:
+            if True:
+                # 4. Генерируем новый файл
+                file_path = self.create_ics_file(schedule)
+                # Сохраняем файл в БД
+                new_file = File(file_path=file_path)
+                new_file.save()
+                schedule.file = new_file
+                schedule.save()
+
+            # 5. Отправляем файл пользователю
+            return FileResponse(open(file_path, 'rb'), as_attachment=True, filename=os.path.basename(file_path))
+
+        # if not schedule.exists():
+        #     return Response({"message": "Расписание не найдено"}, status=404)
+        #
+        # # Проверка наличия файла в БД
+        # if schedule_obj and schedule_obj.file:
+        #     file_path = schedule_obj.file.path
+        # else:
+        #     file_path = os.path.join(settings.MEDIA_ROOT, "schedule", filename)
+        #     if not os.path.exists(file_path):
+        #         self.create_ics_file(schedule, file_path)
+        #
+        #     # Сохранение файла в БД
+        #     new_file = File()
+        #     new_file.file = file_path
+        #     new_file.save()
+        #     if schedule_obj:
+        #         schedule_obj.file = new_file
+        #         schedule_obj.save()
+        #
+        # return FileResponse(open(file_path, 'rb'), as_attachment=True, filename=filename)
 
 
 
@@ -180,25 +212,144 @@ class ScheduleFileView(APIView):
             return lessons
         return Lesson.objects.filter(schedule__group_subgroup__group__group_number=group)
 
-    def create_ics_file(self, schedule, file_path):
+    def create_ics_file(self, schedule):
+        list_days_of_week = ['ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ', 'СБ', 'ВС']
+        time_zone = 'Asia/Yekaterinburg:'
+
+        # Путь к base.txt
+        print('Расписание нашлось', schedule)
+        base_path = os.path.join(settings.STATIC_ROOT, "file", "base.txt")
+
         events = []
-        for lesson in schedule:
-            start_date = lesson.schedule.first().start_schedule
-            repeat_rule = ";INTERVAL=2" if lesson.repetition in ["Числитель", "Знаменатель"] else ""
-            start_time = start_date.strftime("%Y%m%dT%H%M%S")
-            end_time = (start_date + timedelta(hours=1, minutes=30)).strftime("%Y%m%dT%H%M%S")
-            events.append(f"BEGIN:VEVENT\nDTSTART:{start_time}\nDTEND:{end_time}\nSUMMARY:{lesson.discipline}\nDESCRIPTION:{lesson.professor}\nLOCATION:{lesson.campus} {lesson.audience}\nRRULE:FREQ=WEEKLY{repeat_rule}\nEND:VEVENT")
 
-        ics_content = "BEGIN:VCALENDAR\nVERSION:2.0\n" + "\n".join(events) + "\nEND:VCALENDAR"
-        default_storage.save(file_path, ContentFile(ics_content))
+        # Берём первое расписание и определяем дату его начала
+        record = schedule
+        start_schedule = record.start_schedule
+        id_week_of_day = start_schedule.weekday()  # День недели (0 - понедельник, 6 - воскресенье)
+
+        for lesson in record.lesson_set.all():
+            # Определяем день недели для урока
+            id_week_of_day_lesson = list_days_of_week.index(str(lesson.day))
+
+            # Рассчитываем разницу в днях
+            if id_week_of_day_lesson >= id_week_of_day:
+                plus_days = id_week_of_day_lesson - id_week_of_day
+                flag = True
+            else:
+                plus_days = id_week_of_day_lesson - id_week_of_day + 7
+                flag = False
+
+            # Определяем дату первого занятия
+            if lesson.repetition in ['Числитель', 'Каждую неделю'] and flag:
+                date_start_lesson = start_schedule + timedelta(days=plus_days)
+            elif lesson.repetition in ['Знаменатель', 'Каждую неделю'] and not flag:
+                date_start_lesson = start_schedule + timedelta(days=plus_days)
+            else:
+                date_start_lesson = start_schedule + timedelta(days=plus_days + 7)
+
+            # Определяем правило повторения
+            repetition = "FREQ=WEEKLY"
+            if lesson.repetition in ['Числитель', 'Знаменатель']:
+                repetition += ";INTERVAL=2"
+
+            # Формируем строки события
+            start_time = date_start_lesson.strftime("%Y%m%dT") + lesson.time.time_start.strftime("%H%M%S")
+            end_time = date_start_lesson.strftime("%Y%m%dT") + lesson.time.time_end.strftime("%H%M%S")
+
+            event = (
+                "BEGIN:VEVENT\n"
+                f"DTSTART;TZID={time_zone}{start_time}\n"
+                f"DTEND;TZID={time_zone}{end_time}\n"
+                f"SUMMARY:{lesson.discipline}\n"
+                f"DESCRIPTION:{lesson.professor}\n"
+                f"LOCATION:{lesson.campus} {lesson.audience}\n"
+                f"RRULE:{repetition}\n"
+                "END:VEVENT"
+            )
+            events.append(event)
+        print(events)
+        # Читаем base.txt
+        with open(base_path, 'r', encoding='utf-8') as file:
+            base_content = file.readlines()
+
+        # Вставляем события перед `END:VCALENDAR`
+        insert_index = base_content.index("END:VCALENDAR")
+        final_content = base_content[:insert_index] + events + [base_content[insert_index]]
+
+        # Определяем путь сохранения
+        file_name = f"schedule_{record.subgroup.group.number_group}.ics"
+        file_path = os.path.join(settings.MEDIA_ROOT, "schedule", file_name)
+
+        # Создаём папку, если её нет
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+        # Записываем в файл
+        with open(file_path, 'w', encoding='utf-8') as ics_file:
+            ics_file.write("".join(final_content))
+
+        return file_path
 
 
-
-
-
-
-
-
+#
+# def create_file(record, lesson):
+#     id_week_of_day = record.start_schedule.weekday()
+#     id_week_of_day_lesson = list_days_of_week.index(str(lesson.day))
+#     if id_week_of_day_lesson >= id_week_of_day:
+#         plus_days = id_week_of_day_lesson - id_week_of_day
+#         flag = True
+#     else:
+#         plus_days = id_week_of_day_lesson - id_week_of_day + 7
+#         flag = False
+#
+#     if str(lesson.repetition) in ['Числитель', 'Каждую неделю'] and flag:
+#         date_start_lesson = record.start_schedule + timedelta(days=plus_days)
+#     elif str(lesson.repetition) in ['Знаменатель', 'Каждую неделю'] and not flag:
+#         date_start_lesson = record.start_schedule + timedelta(days=plus_days)
+#     else:
+#         date_start_lesson = record.start_schedule + timedelta(days=plus_days + 7)
+#
+#     repetition = ''
+#     if str(lesson.repetition) in ['Числитель', 'Знаменатель']:
+#         repetition = ';INTERVAL=2'
+#     return file_collection(date_start_lesson, repetition, record, lesson)
+#
+# def file_collection(date_start_lesson, repetition, record, lesson):
+#     part_base_path = os.path.join(settings.STATIC_ROOT, 'file', 'part_base.txt')
+#     list_attrs = [time_zone+str(date_start_lesson.strftime('%Y%m%d'))+'T'+str(lesson.time.time_start.strftime('%H%M%S')),
+#                   time_zone+str(date_start_lesson.strftime('%Y%m%d'))+'T'+str(lesson.time.time_end.strftime('%H%M%S')),
+#                   str(record.end_schedule.strftime('%Y%m%d')) + 'T235959' + repetition,
+#                   str(datetime.now().strftime('%Y%m%d')),
+#                   '<b>' + str(lesson.professor) + '</b><br>' + replace_none(record),
+#                   str(lesson.campus)+str(lesson.audience) + ' ' + str(lesson.type),
+#                   str(lesson.discipline)]
+#     with open(part_base_path, 'r') as file:
+#         content = file.readlines()
+#         for i in range(1, len(content)-5):
+#             f = content[i][:-1]
+#             f += str(list_attrs[i-1]) + '\n'
+#             content[i] = f
+#     return content
+#
+# def full_file(list_lessons, name):
+#     name_file = 'Расписание '+name
+#     base_path = os.path.join(settings.STATIC_ROOT, 'file', 'base.txt')
+#
+#     with open(base_path, 'r') as file:
+#         full_content = file.readlines()
+#         content = full_content[:-1]
+#         end_content = full_content[-1]
+#         content += list_lessons
+#         content += end_content
+#
+#     content_str = ''.join(content)
+#     encoded_content = content_str.encode('utf-8')
+#     save_path = 'file/schedule/' + name_file + '.ics'
+#     default_storage.save(save_path, ContentFile(encoded_content))
+#     return save_path
+#
+#
+#
+#
 
 
 
