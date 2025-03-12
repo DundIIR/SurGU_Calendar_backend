@@ -42,8 +42,14 @@ class GroupList(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        groups = Group.objects.values_list('number_group', flat=True)
-        return Response(list(groups))
+        groups = Group.objects.all()
+        data = {}
+
+        for group in groups:
+            subgroups = Subgroup.objects.filter(group=group).values_list('name_subgroup', flat=True)
+            data[group.number_group] = list(subgroups)
+
+        return Response(data)
 
 
 # Контроллер для получения списка всех преподавателей
@@ -119,15 +125,13 @@ class ScheduleFileView(APIView):
 
     def get(self, request):
         search = request.query_params.get('search', '')
-        subgroup = request.query_params.get('subgroup', None)
-        professors = request.query_params.get('professors', 'false').lower() == 'true'
+        subgroup_name = request.query_params.get('subgroup', None)
+        professor = request.query_params.get('professors', 'false').lower() == 'true'
 
         if not search:
             return Response({"message": "Поле 'search' обязательно"}, status=400)
 
-        print(search, subgroup, professors)
-
-        if professors:
+        if professor:
             professor = self.get_professor(search)
             if not professor:
                 return Response({"message": "Преподаватель не найден"}, status=404)
@@ -135,99 +139,71 @@ class ScheduleFileView(APIView):
             filename = f"schedule_{professor.last_name}.ics"
             schedule_obj = Schedule.objects.filter(professor=professor).first()
         else:
-
-
+            # 1. Получаем группу
             group = Group.objects.filter(number_group=search).first()
             if not group:
                 return Response({"message": "Группа не найдена"}, status=404)
 
-            # Получаем подгруппу, если указана
-            if subgroup and subgroup.lower() != "none":
-                subgroup = Subgroup.objects.filter(group=group, name_subgroup=subgroup).first()
+            # 2. Получаем все подгруппы этой группы
+            all_subgroups = Subgroup.objects.filter(group=group)
+
+            if subgroup_name and subgroup_name.lower() != "none":
+                # 3. Получаем выбранную подгруппу
+                subgroup = all_subgroups.filter(name_subgroup=subgroup_name).first()
                 if not subgroup:
                     return Response({"message": "Подгруппа не найдена"}, status=404)
+                # 4. Берём только выбранную подгруппу + "0"
+                selected_subgroups = all_subgroups.filter(Q(name_subgroup="0") | Q(id=subgroup.id))
             else:
-                subgroup = None
+                # Если подгруппа не выбрана, берём все подгруппы группы
+                selected_subgroups = all_subgroups
+                subgroup = all_subgroups.filter(name_subgroup="0").first()
+                if not subgroup:
+                    return Response({"message": "Подгруппа не найдена"}, status=404)
 
-            # 2. Находим расписание для этой группы и подгруппы
-            schedule = Schedule.objects.filter(subgroup=subgroup).first()
-            if not schedule:
-                return Response({"message": "Расписание не найдено"}, status=404)
+            # 5. Берем все необходимые расписания (для 0 -> 0, А, Б)
+            schedules = Schedule.objects.filter(subgroup__in=selected_subgroups)
 
-            # if schedule.file:
-            #     file_path = schedule.file.file_path.path
-            # else:
-            if True:
-                # 4. Генерируем новый файл
-                file_path = self.create_ics_file(schedule)
-                # Сохраняем файл в БД
-                new_file = File(file_path=file_path)
+            # 6. Определяем главное расписание исходя из запроса
+            schedule = next((s for s in schedules if s.subgroup == subgroup), None)
+
+            # 7. Проверяем есть ли файл у этого расписания
+            if schedule.file is not None:
+                file_url = schedule.file.file_url
+            else:
+                # 8. Получаем занятия для всех найденных расписаний
+                lessons = Lesson.objects.filter(schedule__in=schedules).distinct()
+
+                file_path = self.create_ics_file(subgroup, schedule, lessons)
+                file_url = self.upload_to_s3(file_path)
+
+                # Удаляем файл из media, если загрузка в S3 успешна
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+
+                # Сохраняем ссылку на файл в базе данных
+                new_file = FileSchedule(file_name=file_path, file_url=file_url)
                 new_file.save()
                 schedule.file = new_file
                 schedule.save()
 
-            # 5. Отправляем файл пользователю
-            return FileResponse(open(file_path, 'rb'), as_attachment=True, filename=os.path.basename(file_path))
+                # 9. Отправляем файл пользователю
+            return Response({"file_url": file_url})
 
-        # if not schedule.exists():
-        #     return Response({"message": "Расписание не найдено"}, status=404)
-        #
-        # # Проверка наличия файла в БД
-        # if schedule_obj and schedule_obj.file:
-        #     file_path = schedule_obj.file.path
-        # else:
-        #     file_path = os.path.join(settings.MEDIA_ROOT, "schedule", filename)
-        #     if not os.path.exists(file_path):
-        #         self.create_ics_file(schedule, file_path)
-        #
-        #     # Сохранение файла в БД
-        #     new_file = File()
-        #     new_file.file = file_path
-        #     new_file.save()
-        #     if schedule_obj:
-        #         schedule_obj.file = new_file
-        #         schedule_obj.save()
-        #
-        # return FileResponse(open(file_path, 'rb'), as_attachment=True, filename=filename)
-
-
-
-    def get_professor(self, search):
-        parts = search.split()
-        if len(parts) == 1:
-            return Professor.objects.filter(last_name__icontains=parts[0]).first()
-        elif len(parts) == 2:
-            return Professor.objects.filter(last_name__icontains=parts[0], first_name__icontains=parts[1]).first()
-        elif len(parts) == 3:
-            return Professor.objects.filter(last_name=parts[0], first_name=parts[1], patronymic=parts[2]).first()
-        return None
-
-    def get_group_schedule(self, group, subgroup):
-        if subgroup and subgroup.lower() != "none":
-            lessons1 = Lesson.objects.filter(schedule__group_subgroup__group__group_number=group,
-                                             schedule__group_subgroup__subgroup_name=subgroup)
-            lessons2 = Lesson.objects.filter(schedule__group_subgroup__group__group_number=group,
-                                             schedule__group_subgroup__subgroup_name=None)
-            lessons = lessons1.union(lessons2)
-            return lessons
-        return Lesson.objects.filter(schedule__group_subgroup__group__group_number=group)
-
-    def create_ics_file(self, schedule):
+    def create_ics_file(self, subgroup, schedule, lessons):
+        print('Файла нет, создаем свой ', subgroup)
         list_days_of_week = ['ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ', 'СБ', 'ВС']
         time_zone = 'Asia/Yekaterinburg:'
 
-        # Путь к base.txt
-        print('Расписание нашлось', schedule)
         base_path = os.path.join(settings.STATIC_ROOT, "file", "base.txt")
 
         events = []
 
-        # Берём первое расписание и определяем дату его начала
-        record = schedule
-        start_schedule = record.start_schedule
-        id_week_of_day = start_schedule.weekday()  # День недели (0 - понедельник, 6 - воскресенье)
+        start_schedule = schedule.start_schedule
+        end_schedule = schedule.end_schedule
 
-        for lesson in record.lesson_set.all():
+        id_week_of_day = start_schedule.weekday()  # День недели (0 - понедельник, 6 - воскресенье)
+        for lesson in lessons:
             # Определяем день недели для урока
             id_week_of_day_lesson = list_days_of_week.index(str(lesson.day))
 
@@ -239,35 +215,47 @@ class ScheduleFileView(APIView):
                 plus_days = id_week_of_day_lesson - id_week_of_day + 7
                 flag = False
 
-            # Определяем дату первого занятия
-            if lesson.repetition in ['Числитель', 'Каждую неделю'] and flag:
+
+
+            if str(lesson.repetition).lower() == 'каждую неделю':
                 date_start_lesson = start_schedule + timedelta(days=plus_days)
-            elif lesson.repetition in ['Знаменатель', 'Каждую неделю'] and not flag:
+            elif lesson.repetition == 'Числитель' and flag:
+                date_start_lesson = start_schedule + timedelta(days=plus_days)
+            elif lesson.repetition == 'Знаменатель' and not flag:
                 date_start_lesson = start_schedule + timedelta(days=plus_days)
             else:
                 date_start_lesson = start_schedule + timedelta(days=plus_days + 7)
 
+            # Формируем строки события
+            start_time = time_zone+str(date_start_lesson.strftime('%Y%m%d'))+'T'+str(lesson.time.time_start.strftime('%H%M%S'))
+            end_time = time_zone+str(date_start_lesson.strftime('%Y%m%d'))+'T'+str(lesson.time.time_end.strftime('%H%M%S'))
+
             # Определяем правило повторения
-            repetition = "FREQ=WEEKLY"
+            repetition = "FREQ=WEEKLY;UNTIL=" + end_schedule.strftime('%Y%m%d') + 'T235959'
             if lesson.repetition in ['Числитель', 'Знаменатель']:
                 repetition += ";INTERVAL=2"
 
-            # Формируем строки события
-            start_time = date_start_lesson.strftime("%Y%m%dT") + lesson.time.time_start.strftime("%H%M%S")
-            end_time = date_start_lesson.strftime("%Y%m%dT") + lesson.time.time_end.strftime("%H%M%S")
+            created = str(datetime.now().strftime('%Y%m%d'))
+
+            description = '<b>' + str(lesson.professor) + '</b><br>'
+
+            location = (("online" if str(lesson.campus).lower() == "эоидот" else str(lesson.campus))
+                        + (str(lesson.audience) if lesson.audience else "")
+                        + ' ' + str(lesson.type))
 
             event = (
                 "BEGIN:VEVENT\n"
-                f"DTSTART;TZID={time_zone}{start_time}\n"
-                f"DTEND;TZID={time_zone}{end_time}\n"
-                f"SUMMARY:{lesson.discipline}\n"
-                f"DESCRIPTION:{lesson.professor}\n"
-                f"LOCATION:{lesson.campus} {lesson.audience}\n"
+                f"DTSTART;TZID={start_time}\n"
+                f"DTEND;TZID={end_time}\n"
                 f"RRULE:{repetition}\n"
-                "END:VEVENT"
+                f"CREATED:{created}\n"
+                f"DESCRIPTION:{description}\n"
+                f"LOCATION:{location}\n"
+                f"SUMMARY:{lesson.discipline}\n"
+                "END:VEVENT\n"
             )
             events.append(event)
-        print(events)
+
         # Читаем base.txt
         with open(base_path, 'r', encoding='utf-8') as file:
             base_content = file.readlines()
@@ -277,10 +265,9 @@ class ScheduleFileView(APIView):
         final_content = base_content[:insert_index] + events + [base_content[insert_index]]
 
         # Определяем путь сохранения
-        file_name = f"schedule_{record.subgroup.group.number_group}.ics"
+        file_name = f"schedule_{subgroup.group}_{subgroup.name_subgroup}.ics"
         file_path = os.path.join(settings.MEDIA_ROOT, "schedule", file_name)
 
-        # Создаём папку, если её нет
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
         # Записываем в файл
@@ -288,6 +275,43 @@ class ScheduleFileView(APIView):
             ics_file.write("".join(final_content))
 
         return file_path
+
+    def upload_to_s3(self, file_path):
+        # Создаем клиента для S3
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            endpoint_url=settings.AWS_END_POINT,
+            region_name=settings.AWS_REGION,
+        )
+
+        # Создаем уникальное имя для файла
+        unique_name = f"{os.path.basename(file_path)}"
+
+        # Загружаем файл в S3
+        with open(file_path, 'rb') as file:
+            s3_client.upload_fileobj(
+                Fileobj=file,
+                Bucket=settings.AWS_BUCKET,
+                Key=f'icl/{unique_name}',
+                ExtraArgs={'ContentType': 'text/calendar'}
+            )
+
+        # Возвращаем URL файла
+        file_url = f"{settings.AWS_END_POINT}/{settings.AWS_BUCKET}/icl/{unique_name}"
+        file_url = file_url.replace("http://", "https://")
+        return file_url
+
+    def get_professor(self, search):
+        parts = search.split()
+        if len(parts) == 1:
+            return Professor.objects.filter(last_name__icontains=parts[0]).first()
+        elif len(parts) == 2:
+            return Professor.objects.filter(last_name__icontains=parts[0], first_name__icontains=parts[1]).first()
+        elif len(parts) == 3:
+            return Professor.objects.filter(last_name=parts[0], first_name=parts[1], patronymic=parts[2]).first()
+        return None
 
 
 #

@@ -143,7 +143,7 @@ class Schedule(models.Model):
     start_schedule = models.DateField(verbose_name='Дата начала')
     end_schedule = models.DateField(verbose_name='Дата конца')
     subgroup = models.ForeignKey('Subgroup', on_delete=models.CASCADE, verbose_name='Группа/Подгруппа')
-    file = models.ForeignKey('File', on_delete=models.SET_NULL, null=True, blank=True, verbose_name='Файл')
+    file = models.ForeignKey('FileSchedule', on_delete=models.SET_NULL, null=True, blank=True, verbose_name='Файл')
 
     def __str__(self):
         return f"{self.subgroup}"
@@ -193,11 +193,7 @@ class FileSchedule(models.Model):
     file_name = models.CharField(max_length=255, blank=True, null=True, verbose_name="Название файла")
     file_url = models.URLField(null=True, verbose_name="Ссылка на файл")
 
-    # def save(self, *args, **kwargs):
-    #     if self.file_path:
-    #         self.file_name = self.file_path.name.split('/')[-1]
-    #         self.file_url = self.file_path.url
-    #     super().save(*args, **kwargs)
+
 
     def __str__(self):
         return f"{self.file_url}"
