@@ -3,7 +3,7 @@ import boto3
 from django.db.models import Q
 from django.http import FileResponse
 from django.shortcuts import render, get_object_or_404
-from rest_framework import generics
+from rest_framework import generics, status
 from rest_framework.parsers import MultiPartParser
 from rest_framework.views import APIView
 from urllib.parse import unquote
@@ -61,6 +61,125 @@ class ProfessorsList(APIView):
         professors = Professor.objects.all()
         full_names = [f"{prof.last_name} {prof.first_name} {prof.patronymic}" for prof in professors]
         return Response(full_names)
+
+
+# Проверка авторизации пользователя
+class ProtectedDataAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        serializer = CustomUserSerializer(request.user)
+        return Response({
+            'user': serializer.data
+        })
+
+
+## С РЕГИСТРАЦИЕЙ
+
+
+# Контроллер для получения расписания новый
+class ListLessonsAPI(generics.ListAPIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    serializer_class = LessonSerializer
+
+    def get_queryset(self):
+        group = self.request.GET.get('group', '').strip()
+        subgroup = self.request.GET.get('subgroup', '').strip()
+        professors = self.request.GET.get('professors', '').strip()
+
+        if not group and not professors:
+            return Lesson.objects.none()  # Пустой queryset
+
+        return search_lessons(group=group, subgroup=subgroup, professors=professors)
+
+    def list(self, request, *args, **kwargs):
+        try:
+            queryset = self.filter_queryset(self.get_queryset())
+
+            if not queryset.exists():
+                return Response(
+                    {
+                        "success": False,
+                        "error": "Расписание не найдено",
+                        "details": "Попробуйте изменить параметры поиска"
+                    },
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            serializer = self.get_serializer(queryset, many=True)
+
+            return Response({
+                "success": True,
+                "count": len(serializer.data),
+                "results": serializer.data
+            })
+
+        except Exception as e:
+            print(f"Ошибка при получении расписания: {str(e)}")
+            return Response(
+                {
+                    "success": False,
+                    "error": "Внутренняя ошибка сервера",
+                    "details": str(e)
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+def search_lessons(group='', subgroup='', professors=''):
+
+    # Вариант 1: Поиск по профессору
+    if professors:
+        print('Поиск по профессору')
+        parts = professors.split()
+        last_name = parts[0] if len(parts) > 0 else ''
+        first_name = parts[1] if len(parts) > 1 else ''
+        patronymic = parts[2] if len(parts) > 2 else ''
+
+        professor_query = Professor.objects.all()
+        if last_name:
+            professor_query = professor_query.filter(last_name__icontains=last_name)
+        if first_name:
+            professor_query = professor_query.filter(first_name__icontains=first_name)
+        if patronymic:
+            professor_query = professor_query.filter(patronymic__icontains=patronymic)
+
+        professors_found = professor_query.distinct()
+        return Lesson.objects.filter(professor__in=professors_found)
+
+    # Вариант 2: Поиск по подгруппе
+    elif subgroup:
+        lessons_subgroup = Lesson.objects.filter(schedule__subgroup__group__number_group=group,
+                                                 schedule__subgroup__name_subgroup=subgroup)
+        lessons_zero_subgroup = Lesson.objects.filter(schedule__subgroup__group__number_group=group,
+                                                      schedule__subgroup__name_subgroup='0')
+        return lessons_subgroup.union(lessons_zero_subgroup)
+    # Вариант 3: Поиск по группе
+    elif group:
+        print('Поиск по группе')
+        lessons_query = Lesson.objects.filter(schedule__subgroup__group__number_group=group)
+        return lessons_query
+
+    return Lesson.objects.none()
+
+
+# def search_lessons(self, attr1, attr2=None, attr3=None):
+#     print('Составляем расписание')
+#     if attr3:
+#         search_results = Professor.objects.get(last_name=attr1, first_name=attr2, patronymic=attr3)
+#         lessons = Lesson.objects.filter(professor=search_results)
+#     elif attr2:
+#         lessons1 = Lesson.objects.filter(schedule__subgroup__group__number_group=attr1,
+#                                          schedule__subgroup__name_subgroup=attr2)
+#         lessons2 = Lesson.objects.filter(schedule__subgroup__group__number_group=attr1,
+#                                          schedule__subgroup__name_subgroup='0')
+#         lessons = lessons1.union(lessons2)
+#     else:
+#         lessons = Lesson.objects.filter(schedule__subgroup__group__number_group=attr1)
+#         print(lessons, attr1)
+#     return lessons
+
+
 
 
 # Контроллер для проверки запроса
@@ -378,17 +497,6 @@ class ScheduleFileView(APIView):
 
 
 
-def split_by_letter(input_string):
-    pattern = r"^\d{3}-\d{2}[а-яА-Я]$"
-
-    # ФИО, разделенное по пробелам: Кузин Дмитрий Александрович
-    if ' ' in input_string:
-        return input_string.split(' ')
-    # Группа с подгруппой из одной буквы: 609-11а
-    elif re.search(pattern, input_string):
-        return [input_string[:-1], input_string[-1]]
-    # Группа без подгруппы: 609-11
-    return [input_string]
 
 
 # Контроллер для получения расписания с фильтрацией
@@ -404,8 +512,20 @@ class LessonAPIList(generics.ListAPIView):
         if search_query:
             request_list = split_by_letter(search_query)
             if len(request_list) <= 3:
-                return search_lessons(self, *request_list)
+                return None
         return None
+
+def split_by_letter(input_string):
+    pattern = r"^\d{3}-\d{2}[а-яА-Я]$"
+
+    # ФИО, разделенное по пробелам: Кузин Дмитрий Александрович
+    if ' ' in input_string:
+        return input_string.split(' ')
+    # Группа с подгруппой из одной буквы: 609-11а
+    elif re.search(pattern, input_string):
+        return [input_string[:-1], input_string[-1]]
+    # Группа без подгруппы: 609-11
+    return [input_string]
 
 
 # Контроллер для получения списка групп с фильтрацией
@@ -439,32 +559,8 @@ class ProfessorListAPIView(generics.ListAPIView):
         return Professor.objects.all()
 
 
-def search_lessons(self, attr1, attr2=None, attr3=None):
-    print('Составляем расписание')
-    if attr3:
-        search_results = Professor.objects.get(last_name=attr1, first_name=attr2, patronymic=attr3)
-        lessons = Lesson.objects.filter(professor=search_results)
-    elif attr2:
-        lessons1 = Lesson.objects.filter(schedule__subgroup__group__number_group=attr1,
-                                         schedule__subgroup__name_subgroup=attr2)
-        lessons2 = Lesson.objects.filter(schedule__subgroup__group__number_group=attr1,
-                                         schedule__subgroup__name_subgroup='0')
-        lessons = lessons1.union(lessons2)
-    else:
-        lessons = Lesson.objects.filter(schedule__subgroup__group__number_group=attr1)
-        print(lessons, attr1)
-    return lessons
 
 
-# Проверка авторизации пользователя
-class ProtectedDataAPIView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        serializer = CustomUserSerializer(request.user)
-        return Response({
-            'user': serializer.data
-        })
 
 
 class UserListAPIView(generics.ListAPIView):
