@@ -17,7 +17,9 @@ class LessonSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
     def to_representation(self, instance):
-        return create_json(instance)
+        request = self.context.get('request')
+        shorten_names = request.GET.get('shorten_names', 'false').lower() == 'true'
+        return create_json(instance, shorten_names)
 
 
 # Сериализатор для групп

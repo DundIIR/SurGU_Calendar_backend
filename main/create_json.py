@@ -2,8 +2,49 @@ from datetime import datetime, timedelta
 
 list_days_of_week = ['ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ', 'СБ', 'ВС']
 
+def should_shorten_word(word):
+    """Определяет, нужно ли сокращать слово"""
+    # Не сокращаем двухбуквенные слова
+    if len(word) <= 2:
+        return False
 
-def create_json(instance):
+    if word.upper() == "ФТД:":
+        return False
+
+    if 'IT' in word.upper():
+        return False
+
+    return True
+
+
+def create_short_name(full_name):
+    """Создает сокращенное название по правилам"""
+    words = full_name.split()
+
+    # Если название из одного слова - не сокращаем
+    if len(words) == 1:
+        return full_name
+
+    # Если из двух слов - проверяем длину каждого
+    if len(words) == 2:
+        word1, word2 = words
+        # Сокращаем только если оба слова подлежат сокращению
+        if should_shorten_word(word1) and should_shorten_word(word2):
+            return f"{word1[0].upper()}{word2[0].upper()}"
+        return full_name
+
+    # Для трех и более слов применяем общее правило
+    initials = []
+    for word in words:
+        if should_shorten_word(word):
+            initials.append(word[0].upper())
+        else:
+            initials.append(word)
+
+    # Собираем результат, убирая лишние пробелы
+    return ''.join(initials)
+
+def create_json(instance, shorten_names=True):
     result = []
     schedules = instance.schedule.all()
 
@@ -17,6 +58,8 @@ def create_json(instance):
             'location': '',
             'summary': '',
             'description': '',
+            'professor': '',
+            'group': '',
             'subgroup': ''
         }
 
@@ -64,31 +107,37 @@ def create_json(instance):
             type_name = getattr(getattr(instance, 'type', None), 'name_type', '')
             json_data['location'] = f"{campus}{audience_num} {type_name}".strip()
 
-            # Формирование summary (инициалы дисциплины)
+            # Формирование summary (полное название дисциплины)
             name_discipline = getattr(getattr(instance, 'discipline', None), 'name_discipline', '')
             if name_discipline:
-                initials = []
-                for word in name_discipline.split():
-                    if len(word) > 1:
-                        initials.append(word[0].upper())
-                    else:
-                        initials.append(word[0].lower())
-                json_data['summary'] = ''.join(initials)
+                if shorten_names:
+                    json_data['summary'] = create_short_name(name_discipline)
+                else:
+                    json_data['summary'] = name_discipline
 
-            # Формирование description (ФИО преподавателя + название дисциплины)
+            # Формирование description (ФИО преподавателя + полное название дисциплины, если сокращали его)
+            if shorten_names and name_discipline:
+                # Добавляем полное название через два переноса строки
+                json_data['description'] = f"{name_discipline}"
+
             professor = instance.professor
             if professor:
-                professor_name = f"{professor.last_name} {professor.first_name} {professor.patronymic}".strip()
-                json_data['description'] = f"{professor_name}\n\n{name_discipline}".strip()
-            else:
-                json_data['description'] = name_discipline
+                json_data['professor'] = f"{professor.last_name} {professor.first_name} {professor.patronymic}".strip()
 
-            # Формирование subgroup
+            # Формирование group и subgroup (раздельно)
             subgroup = schedule.subgroup
             if subgroup:
                 group_num = getattr(subgroup.group, 'number_group', '')
                 subgroup_name = getattr(subgroup, 'name_subgroup', '')
-                json_data['subgroup'] = f"{group_num}{subgroup_name}" if subgroup_name else group_num
+
+                # Отдельное поле для номера группы
+                json_data['group'] = group_num
+
+                # Отдельное поле для названия подгруппы (если есть)
+                json_data['subgroup'] = subgroup_name if subgroup_name else ""
+            else:
+                json_data['group'] = ""
+                json_data['subgroup'] = ""
 
             result.append(json_data)
 

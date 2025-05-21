@@ -97,7 +97,7 @@ class Professor(models.Model):
     patronymic = models.CharField(max_length=100, verbose_name='Отчество')
     post = models.CharField(max_length=100, verbose_name='Должность')
     department = models.ForeignKey('Department', on_delete=models.SET_DEFAULT, default=1, verbose_name='Кафедра')
-    file = models.ForeignKey('File', on_delete=models.SET_NULL, null=True, blank=True, verbose_name='Файл расписания')
+    file = models.ForeignKey('FileSchedule', on_delete=models.SET_NULL, null=True, blank=True, verbose_name='Файл расписания')
 
     def __str__(self):
         return f"{self.last_name} {self.first_name} {self.patronymic}"
